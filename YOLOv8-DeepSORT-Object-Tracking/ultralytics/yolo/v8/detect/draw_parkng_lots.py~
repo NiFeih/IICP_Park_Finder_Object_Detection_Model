@@ -1,0 +1,186 @@
+import cv2
+import firebase_admin
+from firebase_admin import credentials, firestore
+import json
+import tkinter as tk
+from tkinter import simpledialog
+import os
+
+# List to store parking lot coordinates and names
+parking_lots = []
+
+# Variables to store the current drawing state
+drawing = False
+ix, iy = -1, -1
+
+# Scaling factors (to be calculated after loading images)
+scale_x = 1.0
+scale_y = 1.0
+
+def get_parking_lot_name():
+    """Get the parking lot name from the user using a dialog box."""
+    root = tk.Tk()
+    root.withdraw()  # Hide the root window
+    parking_lot_name = simpledialog.askstring("Input", "Enter parking lot name:")
+    root.destroy()  # Destroy the Tkinter root window after getting input
+    return parking_lot_name
+
+def initialize_firebase():
+    """Initialize the Firebase connection."""
+    # Replace with the path to your Firebase service account key
+    cred = credentials.Certificate('./iparkfinder-d049e-firebase-adminsdk-oydmw-fdd288ecd1.json')
+    firebase_admin.initialize_app(cred)
+    return firestore.client()
+
+def update_database(db, parking_lots):
+    """Update the parking lot data in Firebase Firestore."""
+    for parking_lot in parking_lots:
+        name, _ = parking_lot  # We only need the name for the database
+        # Update Firestore
+        doc_ref = db.collection('ParkingLot').document(name)
+        doc_ref.set({
+            'level': 2,
+            'vacant': True
+        })
+
+def load_parking_lots(filename="parking_lots.json"):
+    """Load parking lot data from the JSON file."""
+    global parking_lots
+    try:
+        with open(filename, "r") as f:
+            parking_lots = json.load(f)
+            print(f"Loaded {len(parking_lots)} parking lots from '{filename}'.")
+    except FileNotFoundError:
+        print(f"No '{filename}' file found. Starting with an empty list.")
+
+def draw_existing_parking_lots():
+    """Draw the existing parking lots on the resized image."""
+    for parking_lot in parking_lots:
+        name = parking_lot[0]  # First element is the parking lot name
+        x1_orig, y1_orig, x2_orig, y2_orig = parking_lot[1:]  # Original coordinates
+
+        # Scale coordinates to match the resized image
+        x1_resized = int(x1_orig * scale_x)
+        y1_resized = int(y1_orig * scale_y)
+        x2_resized = int(x2_orig * scale_x)
+        y2_resized = int(y2_orig * scale_y)
+
+        # Draw the rectangle on the resized image
+        cv2.rectangle(img, (x1_resized, y1_resized), (x2_resized, y2_resized), (0, 255, 0), 2)
+        cv2.putText(img, name, (x1_resized, y1_resized - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+def map_resized_to_original(x_resized, y_resized):
+    """Map coordinates from resized image back to original image."""
+    x_orig = int(x_resized / scale_x)
+    y_orig = int(y_resized / scale_y)
+    return x_orig, y_orig
+
+def map_original_to_resized(x_orig, y_orig):
+    """Map coordinates from original image to resized image."""
+    x_resized = int(x_orig * scale_x)
+    y_resized = int(y_orig * scale_y)
+    return x_resized, y_resized
+
+def draw_rectangle(event, x, y, flags, param):
+    global ix, iy, drawing, parking_lots, img
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        # Start drawing the rectangle
+        drawing = True
+        ix, iy = x, y
+
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if drawing:
+            # If drawing, display the rectangle being drawn
+            img_copy = img.copy()
+            cv2.rectangle(img_copy, (ix, iy), (x, y), (0, 255, 0), 2)
+            cv2.imshow("Draw Parking Lots", img_copy)
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        # Finalize the rectangle
+        drawing = False
+        # Ask for the name of the parking lot
+        parking_lot_name = get_parking_lot_name()
+
+        if parking_lot_name:
+            # Map the resized coordinates back to original coordinates
+            x1_orig, y1_orig = map_resized_to_original(ix, iy)
+            x2_orig, y2_orig = map_resized_to_original(x, y)
+
+            # Save the parking lot data if the name is provided
+            parking_lots.append([parking_lot_name, x1_orig, y1_orig, x2_orig, y2_orig])
+
+            # Draw the final rectangle on the resized image
+            cv2.rectangle(img, (ix, iy), (x, y), (0, 255, 0), 2)
+            cv2.putText(img, parking_lot_name, (ix, iy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        else:
+            # If no name is provided, reset to original state without the current rectangle
+            img[:] = img_original.copy()
+            draw_existing_parking_lots()
+
+        cv2.imshow("Draw Parking Lots", img)
+
+    elif event == cv2.EVENT_RBUTTONDOWN:
+        # Remove a parking lot if right-click is detected within a rectangle
+        # Map the mouse coordinates to original image coordinates
+        x_orig, y_orig = map_resized_to_original(x, y)
+        for i, (name, x1, y1, x2, y2) in enumerate(parking_lots):
+            if x1 <= x_orig <= x2 and y1 <= y_orig <= y2:
+                print(f"Removing parking lot '{name}' at coordinates {(x1, y1, x2, y2)}")
+                parking_lots.pop(i)
+                # Redraw the image without the removed rectangle
+                img[:] = img_original.copy()
+                draw_existing_parking_lots()
+                break
+
+# Initialize Firebase
+db = initialize_firebase()
+
+image_path = "./parking_lots.png"
+if not os.path.exists(image_path):
+    print("Image file does not exist:", image_path)
+    exit()
+
+# Load the original image
+img_original = cv2.imread(image_path)
+original_width, original_height = img_original.shape[1], img_original.shape[0]
+
+# Resize the image to 1280x720
+new_size = (1280, 720)
+img = cv2.resize(img_original, new_size)
+resized_width, resized_height = new_size
+
+# Calculate scaling factors
+scale_x = resized_width / original_width
+scale_y = resized_height / original_height
+
+# Load existing parking lot data
+load_parking_lots()
+
+# Draw existing parking lots on the resized image
+draw_existing_parking_lots()
+
+# Create a window and set the mouse callback function
+cv2.namedWindow("Draw Parking Lots")
+cv2.setMouseCallback("Draw Parking Lots", draw_rectangle)
+
+print("Draw rectangles for each parking lot and name them.")
+print("Right-click to remove a box. Press 's' to save and 'q' to quit without saving.")
+
+# Display the image and wait for user actions
+while True:
+    cv2.imshow("Draw Parking Lots", img)
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
+        break
+    elif key == ord('s'):
+        # Save the parking lot data to a JSON file
+        with open("parking_lots.json", "w") as f:
+            json.dump(parking_lots, f)
+        print(f"Saved {len(parking_lots)} parking lots to 'parking_lots.json'.")
+        # Update the Firestore database
+        update_database(db, parking_lots)
+        print("Updated the Firebase Firestore database.")
+        break
+
+cv2.destroyAllWindows()
